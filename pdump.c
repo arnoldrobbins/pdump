@@ -1,3 +1,4 @@
+
 /*
 *	pdump --- read Prime format MAGSAV tapes like we do 'tar' tapes
 *
@@ -6,6 +7,7 @@
 
 #include <stdio.h>
 #include <ctype.h>
+#include <rmt.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <vaxmba/htreg.h>
@@ -24,17 +26,22 @@
 *	DATESIZE --- size of the date in the header of a magsav tape
 *	FILESIZE --- maximum filename size
 *	MAXNAMES --- maximum number of files that can be loaded
-*	MAXBLOCK --- maximum size of a physical tape block
+*	MAXRBLOK --- maximum size of a raw physical tape block
+*	MAXBBLOK --- maximum size of a blocked physical tape block
+*	NBUFFERS --- number of buffers for buffering ahead
 */
 
 #define TAPESIZE 6
 #define DATESIZE 6
 #define FILESIZE 32
 #define MAXNAMES 1024
-#define MAXBLOCK 4096
+#define MAXRBLOK 4096
+#define MAXBBLOK 2048
+#define NBUFFERS 16
 
 /*
 *	Lastseq --- the last sequence number we read from the tape
+*	Maxblock --- current maximum block size
 *	State --- the current state of our finite state machine
 *	Size --- the size of the current working buffer
 *	Reel --- the current reel of tape we are reading
@@ -50,10 +57,13 @@
 *	Dc1 --- blank compression flag
 *	Td --- current descriptor for the tape
 *	Fd --- current descriptor for the file
+*	Device --- default raw device for reading
+*	Input --- current input device
 *	Tflag --- table of contents only, do not dump files
 *	Vflag --- verbose, print file names as we go
 *	Xflag --- extract, this is the default
 *	Pflag --- restore protections
+*	Bflag --- extract using the block device
 */
 
 int Lastseq;
@@ -69,8 +79,12 @@ int Fd;
 int Savcnt;
 char Name[TAPESIZE];
 char Date[DATESIZE];
-char File[MAXBLOCK];
-char Savfile[MAXBLOCK];
+char File[MAXRBLOK];
+char Savfile[MAXRBLOK];
+
+int Maxblock = MAXRBLOK;
+char Device[] = "/dev/rmt12";
+char *Input = Device;
 
 struct
 {
@@ -83,6 +97,7 @@ int Tflag = 0;
 int Vflag = 0;
 int Xflag = 1;
 int Pflag = 0;
+int Bflag = 0;
 
 /*
 *	head_type --- data structure for reading the tape header
@@ -159,19 +174,19 @@ typedef struct
 	unsigned char d_seqnum[2];
 	unsigned char d_length[2];
 	unsigned char d_rectyp[2];
-	char d_data[MAXBLOCK];
+	char d_data[MAXRBLOK];
 }	data_type;
 
 /*
 *	Buf --- global buffer that everyone reads from
 */
 
-union
+union buf_type
 {
 	head_type head;
 	data_type data;
 	dir_type dir;
-}	Buf;
+}	*Buf;
 
 main(argc, argv)
 int argc;
@@ -207,7 +222,6 @@ initialize(argc, argv)
 int argc;
 char **argv;
 {
-	char *input_device = "/dev/rmt12";	/* default device */
 	int i, ap = 1;
 
 	if (argv[1][0] == '-')
@@ -233,15 +247,21 @@ char **argv;
 			case 'f':
 			case 'F':
 				ap++;
-				if (argc < 3 || strncmp(argv[2], "/dev/", 5) != 0)
+				if (argc < 3 || strncmp(argv[2], "/dev/r", 6) != 0)
 					usage();
 				else
-					input_device = argv[2];
+					Input = argv[2];
 				break;
 			
 			case 'p':
 			case 'P':
 				Pflag = 1;
+				break;
+
+			case 'b':
+			case 'B':
+				Bflag = 1;
+				Maxblock = MAXBBLOK;
 				break;
 
 			default:
@@ -268,8 +288,11 @@ char **argv;
  *	itself. If you do, remember to rewind it.
  */
 
-	Td = open(input_device, 0);
-	if (Td == -1)
+	if (Bflag)
+		for (i = 5; Input[i]; i++)
+			Input[i] = Input[i + 1];
+
+	if ((Td = open(Input, 0)) == -1)
 	{
 		perror("initialize");
 		exit(1);
@@ -293,7 +316,7 @@ state()
 
 	while (State)
 	{
-		Size = read(Td, &Buf, MAXBLOCK);
+		Size = readblk(Td, &Buf, Maxblock);
 
 		if (Size == -1)
 		{
@@ -342,9 +365,9 @@ check1()
 *	extract the ineresting information from the tape header
 */
 
-	Lastseq = ((int) Buf.head.h_seqnum[0] << 8) + (int) Buf.head.h_seqnum[1];
-	Reel = ((int) Buf.head.h_reel[0] << 8) + (int) Buf.head.h_reel[1];
-	Rev = ((int) Buf.head.h_rev[0] << 8) + (int) Buf.head.h_rev[1];
+	Lastseq = ((int) Buf->head.h_seqnum[0] << 8) + (int) Buf->head.h_seqnum[1];
+	Reel = ((int) Buf->head.h_reel[0] << 8) + (int) Buf->head.h_reel[1];
+	Rev = ((int) Buf->head.h_rev[0] << 8) + (int) Buf->head.h_rev[1];
 
 /*
 *	remove the name and date, remembering to reset the parity bits
@@ -353,19 +376,19 @@ check1()
 
 	for (i = 0; i < DATESIZE; i++)
 	{
-		if ((Buf.head.h_date[i] & 0177) == ' ')
+		if ((Buf->head.h_date[i] & 0177) == ' ')
 			break;
 
-		Date[i] = Buf.head.h_date[i] & 0177;
+		Date[i] = Buf->head.h_date[i] & 0177;
 	}
 	Date[i] = '\0';
 
 	for (i = 0; i < TAPESIZE; i++)
 	{
-		if ((Buf.head.h_name[i] & 0177) == ' ')
+		if ((Buf->head.h_name[i] & 0177) == ' ')
 			break;
 
-		Name[i] = Buf.head.h_name[i] & 0177;
+		Name[i] = Buf->head.h_name[i] & 0177;
 	}
 	Name[i] = '\0';
 
@@ -409,7 +432,7 @@ check4()
 *	check that we have a data record after the directory record
 */
 
-	i = ((int) Buf.data.d_rectyp[0] << 8) + (int) Buf.data.d_rectyp[1];
+	i = ((int) Buf->data.d_rectyp[0] << 8) + (int) Buf->data.d_rectyp[1];
 	if (i != 1)
 	{
 		fprintf(stderr, "check4: record is not a password record\n");
@@ -442,7 +465,7 @@ check3()
 *	first check for an eot record, since it is handled differently
 */
 
-	i = ((int) Buf.data.d_rectyp[0] << 8) + (int) Buf.data.d_rectyp[1];
+	i = ((int) Buf->data.d_rectyp[0] << 8) + (int) Buf->data.d_rectyp[1];
 	if (i == 5)
 	{
 		State = 6;
@@ -460,14 +483,14 @@ check3()
 		exit(1);
 	}
 
-	cnt = ((int) Buf.dir.d_length[0] << 8) + (int) Buf.dir.d_length[1];
+	cnt = ((int) Buf->dir.d_length[0] << 8) + (int) Buf->dir.d_length[1];
 	cnt = (cnt - 3) / 24;
 
 	for (i = 0, j = 0; i < cnt; i++)
 	{
 		for (k = 0; k < FILESIZE; k++)
 		{
-			c = Buf.dir.d_tree[i].t_name[k] & 0177;
+			c = Buf->dir.d_tree[i].t_name[k] & 0177;
 			if (c == ' ')
 				break;
 
@@ -527,7 +550,7 @@ check3()
 *	also create the file or directory while we are at it
 */
 
-	i = Buf.dir.d_tree[cnt-1].t_file;
+	i = Buf->dir.d_tree[cnt-1].t_file;
 	if (i == 0 || i == 1)
 	{
 		if (Fd)
@@ -572,7 +595,7 @@ check5()
 *	check for an eot record first
 */
 
-	i = ((int) Buf.data.d_rectyp[0] << 8) + (int) Buf.data.d_rectyp[1];
+	i = ((int) Buf->data.d_rectyp[0] << 8) + (int) Buf->data.d_rectyp[1];
 	if (i == 5)
 	{
 		State = 6;
@@ -583,7 +606,7 @@ check5()
 *	simply check the record type for data or treename
 */
 
-	i = ((int) Buf.data.d_rectyp[0] << 8) + (int) Buf.data.d_rectyp[1];
+	i = ((int) Buf->data.d_rectyp[0] << 8) + (int) Buf->data.d_rectyp[1];
 	if (i == 1)
 	{
 		if (Accept)
@@ -602,14 +625,14 @@ check5()
 *	calculate the number of entries and build the file name
 */
 
-	cnt = ((int) Buf.dir.d_length[0] << 8) + (int) Buf.dir.d_length[1];
+	cnt = ((int) Buf->dir.d_length[0] << 8) + (int) Buf->dir.d_length[1];
 	cnt = (cnt - 3) / 24;
 
 	for (i = 0, j = 0; i < cnt; i++)
 	{
 		for (k = 0; k < FILESIZE; k++)
 		{
-			c = Buf.dir.d_tree[i].t_name[k] & 0177;
+			c = Buf->dir.d_tree[i].t_name[k] & 0177;
 			if (c == ' ')
 				break;
 
@@ -668,7 +691,7 @@ check5()
 *	figure whether it was a file or directory and set the state
 */
 
-	i = Buf.dir.d_tree[cnt-1].t_file;
+	i = Buf->dir.d_tree[cnt-1].t_file;
 	if (i == 0 || i == 1)
 	{
 		if (! Tflag && Accept)
@@ -709,7 +732,7 @@ check6()
 *	check for the eof's
 */
 
-	if (Size != 0 || (Size = read(Td, &Buf, MAXBLOCK)) != 0)
+	if (Size != 0 || (Size = readblk(Td, &Buf, Maxblock)) != 0)
 	{
 		fprintf(stderr, "check6: missing eof after eot record\n");
 		exit(1);
@@ -751,7 +774,7 @@ char *dir;
 
 copyout()
 {
-	char buf[MAXBLOCK];
+	char buf[MAXRBLOK];
 	int i, j, k, cnt;
 
 	if (Tflag)
@@ -761,7 +784,7 @@ copyout()
 *	calculate the number of CHAR's in this last block
 */
 
-	cnt = ((int) Buf.data.d_length[0] << 8) + (int) Buf.data.d_length[1];
+	cnt = ((int) Buf->data.d_length[0] << 8) + (int) Buf->data.d_length[1];
 	cnt = (2 * cnt) - 6;
 
 /*
@@ -771,7 +794,7 @@ copyout()
 
 	for (i = 0, j = 0; i < cnt; i++)
 	{
-		Buf.data.d_data[i] &= 0177;
+		Buf->data.d_data[i] &= 0177;
 
 /*
 *	check for blank compression and undo it
@@ -779,20 +802,20 @@ copyout()
 
 		if (Dc1)
 		{
-			for (k = 0; k < (int) Buf.data.d_data[i] && j < MAXBLOCK; k++, j++)
+			for (k = 0; k < (int) Buf->data.d_data[i] && j < Maxblock; k++, j++)
 				buf[j] = ' ';
 
-			if (j == MAXBLOCK)	/* buffer filled up */
+			if (j == Maxblock)	/* buffer filled up */
 			{
-				write(Fd, buf, MAXBLOCK);
-				for (j = 0; k < (int) Buf.data.d_data[i]; k++, j++)
+				write(Fd, buf, Maxblock);
+				for (j = 0; k < (int) Buf->data.d_data[i]; k++, j++)
 					buf[j] = ' ';
 			}
 
 			Dc1 = 0;
 			continue;
 		}
-		else if (Buf.data.d_data[i] == 021)	/* ^q */
+		else if (Buf->data.d_data[i] == 021)	/* ^q */
 		{
 			Dc1 = 1;
 			continue;
@@ -804,7 +827,7 @@ copyout()
 *	boundary and skip the next character if it did.
 */
 
-		buf[j] = Buf.data.d_data[i];
+		buf[j] = Buf->data.d_data[i];
 
 		if (buf[j] == '\n' && !(i % 2))
 			i++;
@@ -815,9 +838,9 @@ copyout()
 *	see if the buffer is full. if so, flush it and reset the buffer ptr
 */
 
-		if (j == MAXBLOCK)
+		if (j == Maxblock)
 		{
-			write(Fd, buf, MAXBLOCK);
+			write(Fd, buf, Maxblock);
 			j = 0;
 		}
 	}
@@ -874,18 +897,30 @@ check_eot()
 	printf("please mount next tape (hit cr to continue): ");
 	fflush (stdout);
 
-	mt_oper.mt_count = 1;
-	mt_oper.mt_op = MTREW;
-	ioctl(Td, MTIOCTOP, &mt_oper);
+	if (!Bflag)
+	{
+		mt_oper.mt_count = 1;
+		mt_oper.mt_op = MTREW;
+		ioctl(Td, MTIOCTOP, &mt_oper);
+	}
+	else
+		lseek(Td, 0L, 0);
 
+	close(Td);				/* in case off end of reel */
 	while (getchar() != '\n')
 		;
+
+	if ((Td = open(Input, 0)) == -1)	/* force the reopen */
+	{
+		perror("check_eot");
+		exit(1);
+	}
 }
 
 
 usage()		/* print out how to use and die */
 {
-	fprintf(stderr, "Usage: pdump [-xvtf] [tape_device]\n");
+	fprintf(stderr, "Usage: pdump [-xvtfb] [raw tape device]\n");
 	exit (1);
 }
 
@@ -906,8 +941,8 @@ int cnt;
 	if (! Pflag)
 		return(0644);		/* default mode */
 
-	pmode = ((int) Buf.dir.d_tree[cnt].t_prot[0] << 8)
-		+ ((int) Buf.dir.d_tree[cnt].t_prot[1]);
+	pmode = ((int) Buf->dir.d_tree[cnt].t_prot[0] << 8)
+		+ ((int) Buf->dir.d_tree[cnt].t_prot[1]);
 
 	mode = 0;
 	if (Oread(pmode))
@@ -940,4 +975,47 @@ finish()
 	for (i = 0; Names[i].name != NULL; i++)
 		if (Names[i].state == 2)
 			fprintf(stderr, "%s: not on tape\n", Names[i].name);
+}
+
+
+/*
+*	readblk --- read a block of buffers from the tape
+*/
+
+int readblk(fd, bp, size)
+union buf_type **bp;
+int fd, size;
+{
+	static union buf_type bpool[NBUFFERS];
+	static int spool[NBUFFERS+1] = { -2 };
+	static int bufr = 0;
+
+	int i;
+
+
+/*
+*	see if any buffers are available. if not, read a block of them
+*/
+
+	if (spool[bufr] == -2)
+	{
+		for (i = 0; i < NBUFFERS; i++)
+			if ((spool[i] = read(fd, &bpool[i], size)) <= 0)
+			{
+				if (spool[i] == 0 && Bflag)
+				{
+					close(Td);
+					Td = open(Input, 0);
+				}
+
+				i++;
+				break;
+			}
+
+		spool[i] = -2;
+		bufr = 0;
+	}
+
+	*bp = &bpool[bufr];
+	return(spool[bufr++]);
 }
