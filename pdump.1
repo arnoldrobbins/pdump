@@ -1,0 +1,153 @@
+.TH PDUMP 1 local
+.SH NAME
+pdump \- dump Prime MAGSAVE format tapes a la tar.
+.SH SYNOPSIS
+.B pdump
+[
+.B \-xvptfb
+] [ raw tape device ] [ treename ... ]
+.SH DESCRIPTION
+.I Pdump
+reads Prime MAGSAVE format tapes from the tape drive (/dev/rmt12 default),
+decoding the information, and reconstructing the named directory subtrees
+and files from the tape into the Unix file system.
+.PP
+If
+.B treename
+is a directory,
+.I pdump
+will put that directory and its files and subdirectories in
+the current directory. If 
+.B treename
+is a file, it just puts the file in the current directory.
+Although
+.B treename
+must be a full pathname, intervening subdirectories are not created, only
+the ``leaf'' node.
+For example,
+.RS
+.sp
+pdump -v mfd/lcl/spc/sprint.u
+.sp
+.RE
+will create the directory 'sprint.u' in the current directory, without
+creating 'lcl', and 'spc'.
+.PP
+.BR Treename s
+must be specified starting with the top level directory that was
+dumped to tape.  If an entire logical disk is dumped, the
+.B treename
+must start with
+.RI `` mfd '',
+not the name of the logical disk.
+Also,
+.BR treename s
+must
+.I not
+start with a slash (`/').
+.PP
+.I Pdump
+assumes that you are dumping text files.
+It thus
+.I always
+turns off the parity bit.  This is because Prime's convention is to use
+mark parity, i.e. the eigth bit always on.
+Prime binaries aren't too useful on a Unix system anyway.
+.PP
+.I Pdump
+is called like
+.IR tar (1).
+If no Primos treename is specified, the entire
+tape is processed, otherwise only those specified are considered.
+If arguments are given, they must start with a "\-", and be given
+all together.
+The following arguments are recognized:
+.RS
+.TP
+.B x
+Extract.
+Files are extracted from the tape.  This is the default action.
+The 'x' flag in effect, does nothing.
+It is provided for compatibility with
+.IR tar (1).
+.TP
+.B v
+Verbose.
+This option causes
+.I pdump
+to print out the names of files and directories as it goes along.
+It is wise to use this option.
+.TP
+.B t
+Table of contents.
+This option causes
+.I pdump
+to read the tape, without dumping the files. Instead it simply lists the
+files and directories on the tape.
+.TP
+.B f
+Use named device.
+This option causes
+.I pdump
+to use the device named in the next argument as the input device.
+It had better be a tape device, or
+.I pdump
+will abort.
+.P
+.I Pdump
+recognizes remote tape device file names of the form
+.RS
+.sp
+.IR system [. user ]:/dev/???
+.sp
+.RE
+where
+.I system
+is the remote system,
+the optional
+.I user
+is the login name to use on the remote system, and
+.B /dev/???
+is the particular tape device.
+The user must have the appropriate permissions on the remote system
+to use this facility.
+.TP
+.B p
+Reset protection modes.
+This option causes
+.I pdump
+to set the protections modes to the same as they were on the Prime.
+The Primos "other" field is used for both "group" and "other" permissions
+on Unix.  Only the primos "read" and "write" protections are checked;
+the "delete" permissions are ignored.  This is arguable.
+.TP
+.B b
+Use block device.
+This option will cause
+.I pdump
+to try to use the block device. This obtains about a 30% speedup in the 
+I/O. It can only be used when the MAGSAV tape has been created with
+1024 word (2048 byte) fixed length records. The raw device must still
+be specified for 'pdump' in the 'f' option and 'pdump' will convert it
+to the block device.
+This will cause massive confusion if used with a remote tape device.
+.RE
+.SH SEE ALSO
+rcp(1),
+tar(1),
+mt(4)
+.SH DIAGNOSTICS
+Self-explanatory.
+.SH BUGS
+Tends to ignore anything it doesn't understand (like segment directories
+and access control lists). This could also be listed as a feature.
+.PP
+Errors generally cause
+.I pdump
+to exit.
+.PP
+Might lose directory synchronization if not started with the first
+reel of a multi-reel MAGSAV. This happens because the entry which
+causes the creation of a directory is on a previous tape.
+.PP
+Cannot (and never will!) write Unix files into a Prime MAGSAV format tape.

@@ -1,6 +1,10 @@
 1985-08-26         Jeff Lee              <gatech!jeff>
 
-	* pdump.c: Dated 1985-08-26 15:56:10 UTC.
+	* pdump.1: Dated 1985-08-26 16:03:46 UTC.
+
+1985-08-26         Jeff Lee              <gatech!jeff>
+
+	* pdump.c: Dated 1985-08-26 15:58:27 UTC.
 	Add support for remote tape devices.
 	Add support for block tape devices.
 	Add -b option.
